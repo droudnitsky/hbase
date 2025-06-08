@@ -26,8 +26,10 @@ import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -58,6 +60,7 @@ import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.apache.hadoop.hbase.util.FSUtils;
 import org.apache.hadoop.hbase.util.HFileArchiveUtil;
 import org.apache.hadoop.hbase.util.Pair;
+import org.apache.hadoop.hbase.util.Strings;
 import org.apache.hadoop.io.BytesWritable;
 import org.apache.hadoop.io.NullWritable;
 import org.apache.hadoop.io.Writable;
@@ -118,6 +121,7 @@ public class ExportSnapshot extends AbstractHBaseTool implements Tool {
     "snapshot.export.copy.references.threads";
   private static final int DEFAULT_COPY_MANIFEST_THREADS =
     Runtime.getRuntime().availableProcessors();
+  private static final String CONF_STORAGE_POLICY = "snapshot.export.storage.policy.family";
 
   static class Testing {
     static final String CONF_TEST_FAILURE = "test.snapshot.export.failure";
@@ -155,6 +159,8 @@ public class ExportSnapshot extends AbstractHBaseTool implements Tool {
       new Option(null, "bandwidth", true, "Limit bandwidth to this value in MB/second.");
     static final Option RESET_TTL =
       new Option(null, "reset-ttl", false, "Do not copy TTL for the snapshot");
+    static final Option STORAGE_POLICY = new Option(null, "storage-policy", true,
+      "Storage policy for export snapshot output directory, with format like: f=HOT&g=ALL_SDD");
   }
 
   // Export Map-Reduce Counters, to keep track of the progress
@@ -232,7 +238,7 @@ public class ExportSnapshot extends AbstractHBaseTool implements Tool {
       // Use the default block size of the outputFs if bigger
       int defaultBlockSize = Math.max((int) outputFs.getDefaultBlockSize(outputRoot), BUFFER_SIZE);
       bufferSize = conf.getInt(CONF_BUFFER_SIZE, defaultBlockSize);
-      LOG.info("Using bufferSize=" + StringUtils.humanReadableInt(bufferSize));
+      LOG.info("Using bufferSize=" + Strings.humanReadableInt(bufferSize));
 
       for (Counter c : Counter.values()) {
         context.getCounter(c).increment(0);
@@ -322,6 +328,13 @@ public class ExportSnapshot extends AbstractHBaseTool implements Tool {
 
         // Ensure that the output folder is there and copy the file
         createOutputPath(outputPath.getParent());
+        String family = new Path(inputInfo.getHfile()).getParent().getName();
+        String familyStoragePolicy = generateFamilyStoragePolicyKey(family);
+        if (stringIsNotEmpty(context.getConfiguration().get(familyStoragePolicy))) {
+          String key = context.getConfiguration().get(familyStoragePolicy);
+          LOG.info("Setting storage policy {} for {}", key, outputPath.getParent());
+          outputFs.setStoragePolicy(outputPath.getParent(), key);
+        }
         FSDataOutputStream out = outputFs.create(outputPath, true);
 
         long stime = EnvironmentEdgeManager.currentTime();
@@ -333,10 +346,9 @@ public class ExportSnapshot extends AbstractHBaseTool implements Tool {
 
         long etime = EnvironmentEdgeManager.currentTime();
         LOG.info("copy completed for input=" + inputPath + " output=" + outputPath);
-        LOG
-          .info("size=" + totalBytesWritten + " (" + StringUtils.humanReadableInt(totalBytesWritten)
-            + ")" + " time=" + StringUtils.formatTimeDiff(etime, stime) + String
-              .format(" %.3fM/sec", (totalBytesWritten / ((etime - stime) / 1000.0)) / 1048576.0));
+        LOG.info("size=" + totalBytesWritten + " (" + Strings.humanReadableInt(totalBytesWritten)
+          + ")" + " time=" + StringUtils.formatTimeDiff(etime, stime) + String.format(" %.3fM/sec",
+            (totalBytesWritten / ((etime - stime) / 1000.0)) / 1048576.0));
         context.getCounter(Counter.FILES_COPIED).increment(1);
 
         // Try to Preserve attributes
@@ -421,14 +433,14 @@ public class ExportSnapshot extends AbstractHBaseTool implements Tool {
     }
 
     private boolean stringIsNotEmpty(final String str) {
-      return str != null && str.length() > 0;
+      return str != null && !str.isEmpty();
     }
 
     private long copyData(final Context context, final Path inputPath, final InputStream in,
       final Path outputPath, final FSDataOutputStream out, final long inputFileSize)
       throws IOException {
       final String statusMessage =
-        "copied %s/" + StringUtils.humanReadableInt(inputFileSize) + " (%.1f%%)";
+        "copied %s/" + Strings.humanReadableInt(inputFileSize) + " (%.1f%%)";
 
       try {
         byte[] buffer = new byte[bufferSize];
@@ -443,8 +455,8 @@ public class ExportSnapshot extends AbstractHBaseTool implements Tool {
 
           if (reportBytes >= REPORT_SIZE) {
             context.getCounter(Counter.BYTES_COPIED).increment(reportBytes);
-            context.setStatus(
-              String.format(statusMessage, StringUtils.humanReadableInt(totalBytesWritten),
+            context
+              .setStatus(String.format(statusMessage, Strings.humanReadableInt(totalBytesWritten),
                 (totalBytesWritten / (float) inputFileSize) * 100.0f) + " from " + inputPath
                 + " to " + outputPath);
             reportBytes = 0;
@@ -452,10 +464,9 @@ public class ExportSnapshot extends AbstractHBaseTool implements Tool {
         }
 
         context.getCounter(Counter.BYTES_COPIED).increment(reportBytes);
-        context
-          .setStatus(String.format(statusMessage, StringUtils.humanReadableInt(totalBytesWritten),
-            (totalBytesWritten / (float) inputFileSize) * 100.0f) + " from " + inputPath + " to "
-            + outputPath);
+        context.setStatus(String.format(statusMessage, Strings.humanReadableInt(totalBytesWritten),
+          (totalBytesWritten / (float) inputFileSize) * 100.0f) + " from " + inputPath + " to "
+          + outputPath);
 
         return totalBytesWritten;
       } finally {
@@ -748,7 +759,7 @@ public class ExportSnapshot extends AbstractHBaseTool implements Tool {
 
     if (LOG.isDebugEnabled()) {
       for (int i = 0; i < sizeGroups.length; ++i) {
-        LOG.debug("export split=" + i + " size=" + StringUtils.humanReadableInt(sizeGroups[i]));
+        LOG.debug("export split=" + i + " size=" + Strings.humanReadableInt(sizeGroups[i]));
       }
     }
 
@@ -896,8 +907,8 @@ public class ExportSnapshot extends AbstractHBaseTool implements Tool {
    */
   private void runCopyJob(final Path inputRoot, final Path outputRoot, final String snapshotName,
     final Path snapshotDir, final boolean verifyChecksum, final String filesUser,
-    final String filesGroup, final int filesMode, final int mappers, final int bandwidthMB)
-    throws IOException, InterruptedException, ClassNotFoundException {
+    final String filesGroup, final int filesMode, final int mappers, final int bandwidthMB,
+    final String storagePolicy) throws IOException, InterruptedException, ClassNotFoundException {
     Configuration conf = getConf();
     if (filesGroup != null) conf.set(CONF_FILES_GROUP, filesGroup);
     if (filesUser != null) conf.set(CONF_FILES_USER, filesUser);
@@ -912,6 +923,11 @@ public class ExportSnapshot extends AbstractHBaseTool implements Tool {
     conf.setInt(CONF_BANDWIDTH_MB, bandwidthMB);
     conf.set(CONF_SNAPSHOT_NAME, snapshotName);
     conf.set(CONF_SNAPSHOT_DIR, snapshotDir.toString());
+    if (storagePolicy != null) {
+      for (Map.Entry<String, String> entry : storagePolicyPerFamily(storagePolicy).entrySet()) {
+        conf.set(generateFamilyStoragePolicyKey(entry.getKey()), entry.getValue());
+      }
+    }
 
     String jobname = conf.get(CONF_MR_JOB_NAME, "ExportSnapshot-" + snapshotName);
     Job job = new Job(conf);
@@ -998,6 +1014,23 @@ public class ExportSnapshot extends AbstractHBaseTool implements Tool {
     }, conf);
   }
 
+  private Map<String, String> storagePolicyPerFamily(String storagePolicy) {
+    Map<String, String> familyStoragePolicy = new HashMap<>();
+    for (String familyConf : storagePolicy.split("&")) {
+      String[] familySplit = familyConf.split("=");
+      if (familySplit.length != 2) {
+        continue;
+      }
+      // family is key, storage policy is value
+      familyStoragePolicy.put(familySplit[0], familySplit[1]);
+    }
+    return familyStoragePolicy;
+  }
+
+  private static String generateFamilyStoragePolicyKey(String family) {
+    return CONF_STORAGE_POLICY + "." + family;
+  }
+
   private boolean verifyTarget = true;
   private boolean verifySource = true;
   private boolean verifyChecksum = true;
@@ -1012,6 +1045,7 @@ public class ExportSnapshot extends AbstractHBaseTool implements Tool {
   private int filesMode = 0;
   private int mappers = 0;
   private boolean resetTtl = false;
+  private String storagePolicy = null;
 
   @Override
   protected void processOptions(CommandLine cmd) {
@@ -1034,6 +1068,9 @@ public class ExportSnapshot extends AbstractHBaseTool implements Tool {
     verifyTarget = !cmd.hasOption(Options.NO_TARGET_VERIFY.getLongOpt());
     verifySource = !cmd.hasOption(Options.NO_SOURCE_VERIFY.getLongOpt());
     resetTtl = cmd.hasOption(Options.RESET_TTL.getLongOpt());
+    if (cmd.hasOption(Options.STORAGE_POLICY.getLongOpt())) {
+      storagePolicy = cmd.getOptionValue(Options.STORAGE_POLICY.getLongOpt());
+    }
   }
 
   /**
@@ -1202,7 +1239,7 @@ public class ExportSnapshot extends AbstractHBaseTool implements Tool {
     // by the HFileArchiver, since they have no references.
     try {
       runCopyJob(inputRoot, outputRoot, snapshotName, snapshotDir, verifyChecksum, filesUser,
-        filesGroup, filesMode, mappers, bandwidthMB);
+        filesGroup, filesMode, mappers, bandwidthMB, storagePolicy);
 
       LOG.info("Finalize the Snapshot Export");
       if (!skipTmp) {

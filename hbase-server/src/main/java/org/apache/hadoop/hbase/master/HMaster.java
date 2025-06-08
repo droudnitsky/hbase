@@ -162,6 +162,7 @@ import org.apache.hadoop.hbase.master.procedure.MasterProcedureUtil.NonceProcedu
 import org.apache.hadoop.hbase.master.procedure.ModifyTableProcedure;
 import org.apache.hadoop.hbase.master.procedure.ProcedurePrepareLatch;
 import org.apache.hadoop.hbase.master.procedure.ProcedureSyncWait;
+import org.apache.hadoop.hbase.master.procedure.RSProcedureDispatcher;
 import org.apache.hadoop.hbase.master.procedure.ReopenTableRegionsProcedure;
 import org.apache.hadoop.hbase.master.procedure.ServerCrashProcedure;
 import org.apache.hadoop.hbase.master.procedure.TruncateRegionProcedure;
@@ -239,6 +240,7 @@ import org.apache.hadoop.hbase.util.HFileArchiveUtil;
 import org.apache.hadoop.hbase.util.IdLock;
 import org.apache.hadoop.hbase.util.ModifyRegionUtils;
 import org.apache.hadoop.hbase.util.Pair;
+import org.apache.hadoop.hbase.util.ReflectionUtils;
 import org.apache.hadoop.hbase.util.RetryCounter;
 import org.apache.hadoop.hbase.util.RetryCounterFactory;
 import org.apache.hadoop.hbase.util.TableDescriptorChecker;
@@ -451,6 +453,15 @@ public class HMaster extends HRegionServer implements MasterServices {
 
   public static final String WARMUP_BEFORE_MOVE = "hbase.master.warmup.before.move";
   private static final boolean DEFAULT_WARMUP_BEFORE_MOVE = true;
+
+  /**
+   * Use RSProcedureDispatcher instance to initiate master to rs remote procedure execution. Use
+   * this config to extend RSProcedureDispatcher (mainly for testing purpose).
+   */
+  public static final String HBASE_MASTER_RSPROC_DISPATCHER_CLASS =
+    "hbase.master.rsproc.dispatcher.class";
+  private static final String DEFAULT_HBASE_MASTER_RSPROC_DISPATCHER_CLASS =
+    RSProcedureDispatcher.class.getName();
 
   private TaskGroup startupTaskGroup;
 
@@ -1772,7 +1783,11 @@ public class HMaster extends HRegionServer implements MasterServices {
   }
 
   private void createProcedureExecutor() throws IOException {
-    MasterProcedureEnv procEnv = new MasterProcedureEnv(this);
+    final String procedureDispatcherClassName =
+      conf.get(HBASE_MASTER_RSPROC_DISPATCHER_CLASS, DEFAULT_HBASE_MASTER_RSPROC_DISPATCHER_CLASS);
+    final RSProcedureDispatcher procedureDispatcher = ReflectionUtils.instantiateWithCustomCtor(
+      procedureDispatcherClassName, new Class[] { MasterServices.class }, new Object[] { this });
+    final MasterProcedureEnv procEnv = new MasterProcedureEnv(this, procedureDispatcher);
     procedureStore = new RegionProcedureStore(this, masterRegion,
       new MasterProcedureEnv.FsUtilsLeaseRecovery(this));
     procedureStore.registerListener(new ProcedureStoreListener() {
@@ -2114,10 +2129,14 @@ public class HMaster extends HRegionServer implements MasterServices {
         // TODO: bulk assign
         try {
           this.assignmentManager.balance(plan);
+          this.balancer.updateClusterMetrics(getClusterMetricsWithoutCoprocessor());
+          this.balancer.throttle(plan);
         } catch (HBaseIOException hioe) {
           // should ignore failed plans here, avoiding the whole balance plans be aborted
           // later calls of balance() can fetch up the failed and skipped plans
           LOG.warn("Failed balance plan {}, skipping...", plan, hioe);
+        } catch (Exception e) {
+          LOG.warn("Failed throttling assigning a new plan.", e);
         }
         // rpCount records balance plans processed, does not care if a plan succeeds
         rpCount++;
@@ -2167,7 +2186,7 @@ public class HMaster extends HRegionServer implements MasterServices {
 
     final Set<TableName> matchingTables = getTableDescriptors(new LinkedList<>(),
       ntfp.getNamespace(), ntfp.getRegex(), ntfp.getTableNames(), false).stream()
-        .map(TableDescriptor::getTableName).collect(Collectors.toSet());
+      .map(TableDescriptor::getTableName).collect(Collectors.toSet());
     final Set<TableName> allEnabledTables =
       tableStateManager.getTablesInStates(TableState.State.ENABLED);
     final List<TableName> targetTables =
